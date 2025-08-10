@@ -30,6 +30,12 @@ async function connectDB() {
 }
 connectDB();
 
+app.get("/",async (req,res)=>{
+  return res.status(200).json({
+    message:"Healthy"
+  })
+})
+
 // API: GET All conversations
 
 app.get("/api/conversations", async (req, res) => {
