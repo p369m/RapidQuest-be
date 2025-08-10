@@ -1,121 +1,74 @@
-// const { MongoClient } = require("mongodb");
-// const fs = require("fs");
-// const path = require("path");
-
-// async function main() {
-//   const client = new MongoClient("mongodb://127.0.0.1:27017");
-//   try {
-//     await client.connect();
-//     console.log("Connected to MongoDB");
-
-//     const db = client.db("whatsapp");
-//     const collection = db.collection("processed_messages");
-
-//     const dirPath = path.join(__dirname, "payloads");
-//     const files = fs.readdirSync(dirPath);
-
-//     for (const file of files) {
-//       const data = JSON.parse(
-//         fs.readFileSync(path.join(dirPath, file), "utf-8")
-//       );
-
-//       const entry = data.metaData?.entry?.[0];
-//       const changeValue = entry?.changes?.[0]?.value;
-
-//       // If it's a message payload
-//       if (Array.isArray(changeValue?.messages)) {
-//         for (const msg of changeValue.messages) {
-//           const doc = {
-//             message_id: msg.id,
-//             meta_msg_id: msg.id, // In messages, meta_msg_id may not exist
-//             from: msg.from,
-//             text: msg.text?.body || null,
-//             timestamp: parseInt(msg.timestamp, 10),
-//             status:
-//               msg.from === changeValue.metadata.display_phone_number
-//                 ? "sent"
-//                 : "received",
-//           };
-
-//           await collection.updateOne(
-//             { message_id: doc.message_id },
-//             { $setOnInsert: doc },
-//             { upsert: true }
-//           );
-//         }
-//       }
-
-//       // If it's a status payload
-//       if (Array.isArray(changeValue?.statuses)) {
-//         for (const status of changeValue.statuses) {
-//           await collection.updateOne(
-//             {
-//               $or: [
-//                 { message_id: status.id },
-//                 { meta_msg_id: status.meta_msg_id },
-//               ],
-//             },
-//             {
-//               $set: {
-//                 status: status.status,
-//                 status_timestamp: parseInt(status.timestamp, 10),
-//               },
-//             },
-//             { upsert: true } // Ensure doc is created if not found
-//           );
-//         }
-//       }
-//     }
-
-//     console.log("Processing complete.");
-//   } catch (err) {
-//     console.error(err);
-//   } finally {
-//     await client.close();
-//   }
-// }
-
-// main();
-
 const express = require("express");
-const cors = require("cors");
-const { MongoClient } = require("mongodb");
+const cors =require("cors");
+const dotenv = require("dotenv");
+const { MongoClient, ObjectId } = require("mongodb");
+
+
+dotenv.config();
+
+const BUSINESS_PHONE_NUMBER = process.env.BUSINESS_PHONE_NUMBER || "918329446654";
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "629305560276479";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const mongoUri = "mongodb://127.0.0.1:27017";
+const mongoUri = process.env.DB_URL;
 const client = new MongoClient(mongoUri);
 let db, collection;
 
-// Connect to MongoDB once at startup
 async function connectDB() {
-  await client.connect();
-  db = client.db("whatsapp");
-  collection = db.collection("processed_messages");
-  console.log("Connected to MongoDB");
+  try {
+    await client.connect();
+    db = client.db("whatsapp");
+    collection = db.collection("processed_messages");
+    console.log("Connected to MongoDB");
+  } catch (err) {
+    console.error("Failed to connect to MongoDB", err);
+    process.exit(1);
+  }
 }
 connectDB();
 
-// ✅ Get all conversations grouped by user (wa_id)
+// API: GET All conversations
+
 app.get("/api/conversations", async (req, res) => {
   try {
+   
+    const businessPhoneNumber = process.env.BUSINESS_PHONE_NUMBER;
+
     const conversations = await collection
       .aggregate([
         {
+          $sort: { timestamp: -1 } 
+        },
+        {
           $group: {
-            _id: "$from", // group by wa_id (user number)
+            _id: "$contact_wa_id",
             lastMessageTime: { $max: "$timestamp" },
-            name: { $first: "$name" }, // optional, if you stored it
+            contact_name: { $first: "$contact_name" },
+            last_message_text: { $first: "$text" },
+            unread_count: {
+                $sum: {
+                    $cond: [ { $and: [ { $eq: [ "$status", "received" ] }, { $ne: [ "$status", "read" ] } ] }, 1, 0 ]
+                }
+            }
           },
+        },
+        {
+          $match: {
+            _id: { $ne: null, $ne: businessPhoneNumber } 
+          }
         },
         { $sort: { lastMessageTime: -1 } },
         {
           $project: {
-            wa_id: "$_id",
-            name: 1,
             _id: 0,
+            wa_id: "$_id",
+            name: "$contact_name",
+            last_message: "$last_message_text",
+            last_message_time: "$lastMessageTime",
+            unread_count: "$unread_count"
           },
         },
       ])
@@ -128,14 +81,12 @@ app.get("/api/conversations", async (req, res) => {
   }
 });
 
-// ✅ Get all messages for a specific wa_id
+// Api: GET all messages for a specific wa_id
 app.get("/api/messages/:wa_id", async (req, res) => {
   try {
     const { wa_id } = req.params;
     const messages = await collection
-      .find({
-        $or: [{ from: wa_id }, { to: wa_id }],
-      })
+      .find({ contact_wa_id: wa_id })
       .sort({ timestamp: 1 })
       .toArray();
 
@@ -150,3 +101,43 @@ const PORT = 4000;
 app.listen(PORT, () => {
   console.log(`API server running on http://localhost:${PORT}`);
 });
+
+
+// Api: POST Send message
+
+app.post("/api/send", async (req, res) => {
+  try {
+    const { to, text, name } = req.body; 
+    if (!to || !text) {
+      return res.status(400).json({ error: "Missing 'to' or 'text' in request body" });
+    }
+
+
+    const newMessage = {
+      _id: new ObjectId(), 
+      message_id: `wamid.DEMO_${Date.now()}`, 
+      from: BUSINESS_PHONE_NUMBER,
+      text: text,
+      timestamp: new Date(),
+      status: "sent", 
+      message_type: "text",
+      contact_wa_id: to,
+      contact_name: name, 
+      display_phone_number: BUSINESS_PHONE_NUMBER,
+      phone_number_id: PHONE_NUMBER_ID,
+      messaging_product: "whatsapp",
+      payload_id: `demo-payload-${Date.now()}`,
+      gs_app_id: "demo-app",
+      object_type: "whatsapp_business_account",
+      payload_createdAt: new Date(),
+    };
+
+    const result = await collection.insertOne(newMessage);
+    res.status(201).json(newMessage);
+
+  } catch (err) {
+    console.error("Failed to send message:", err);
+    res.status(500).json({ error: "Failed to send message" });
+  }
+});
+
